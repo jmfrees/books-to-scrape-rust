@@ -1,3 +1,4 @@
+use futures::future;
 use futures::{stream, StreamExt};
 use std::num::ParseIntError;
 
@@ -164,9 +165,55 @@ fn build_books_toscrape_url(path: &str) -> Result<Url, ParseError> {
     Url::parse(HOMEPAGE)?.join(path)
 }
 
+struct CatelogueUrlIterator {
+    count: usize,
+}
+
+impl CatelogueUrlIterator {
+    fn new() -> CatelogueUrlIterator {
+        CatelogueUrlIterator { count: 0 }
+    }
+}
+
+// Then, we implement `Iterator` for our `Counter`:
+
+impl Iterator for CatelogueUrlIterator {
+    // we will be counting with usize
+    type Item = Url;
+
+    // next() is the only required method
+    fn next(&mut self) -> Option<Self::Item> {
+        // Increment our count. This is why we started at zero.
+        self.count += 1;
+        if self.count < 50 {
+            build_books_toscrape_url(&format!("catalogue/page-{}.html", self.count)).ok()
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_catelogue_url_iterator() -> Result<(), ParseError> {
+        let mut urls = CatelogueUrlIterator::new();
+        assert_eq!(
+            "https://books.toscrape.com/catalogue/page-1.html",
+            urls.next().unwrap().to_string()
+        );
+        assert_eq!(
+            "https://books.toscrape.com/catalogue/page-2.html",
+            urls.next().unwrap().to_string()
+        );
+        assert_eq!(
+            "https://books.toscrape.com/catalogue/page-3.html",
+            urls.next().unwrap().to_string()
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_build_books_toscrape_url() -> Result<(), ParseError> {
@@ -231,24 +278,17 @@ async fn main() -> Result<()> {
 
     let book_url_selector = make_selector("article.product_pod a[title]");
 
-    let document = get_html(build_books_toscrape_url("").expect("Getting base url must be valid"))
-        .await
-        .unwrap_or_else(|error| panic!("Problem requesting home page {:?}", error));
+    // We can just iterate through the pages on the all product pages.
+    // This is a constant number for this site, but we want to demonstrate a general approach
+    // So we will generate a new url and stop when we get a 404
+    let catelogue_urls = CatelogueUrlIterator::new();
 
-    let category_paths = get_category_paths(&document);
-    log::debug!("Category Paths: {category_paths:?}");
-    let category_urls = category_paths
-        .iter()
-        .filter_map(|x| build_books_toscrape_url(x).ok());
-    log::debug!("Category urls: {category_urls:?}");
-
-    let pages: Vec<scraper::Html> = stream::iter(category_urls)
-        .filter_map(|url| async {
-            log::info!("Getting category page {url}");
-            get_html(url).await.ok()
-        })
-        .collect()
-        .await;
+    let pages: Vec<scraper::Html> = stream::iter(catelogue_urls)
+        .map(get_html)
+        .buffered(10)
+        .take_while(|page| future::ready(page.is_ok()) )
+        .map(|page| page.unwrap())
+        .collect().await;
 
     let book_urls = pages
         .iter()
@@ -257,11 +297,9 @@ async fn main() -> Result<()> {
         .filter_map(|x| build_book_page_url(x).ok());
 
     let books = stream::iter(book_urls)
-        .filter_map(|url| async {
-            log::info!("Getting book page at {url}");
-            get_html(url).await.ok()
-        })
-        .map(|page| Book::from_html(&page))
+        .map(|url| get_html(url))
+        .buffered(10)
+        .map(|page| Book::from_html(&page?))
         .collect::<Vec<Result<Book>>>()
         .await;
     for book in &books {
