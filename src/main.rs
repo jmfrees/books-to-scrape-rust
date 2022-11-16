@@ -136,23 +136,21 @@ fn parse_int(input: &str) -> Result<u32, ParseIntError> {
         .parse::<u32>()
 }
 
-async fn get_html(url: Url) -> Result<scraper::Html> {
-    log::debug!("Requesting resource at url {}", url);
+async fn get_page(url: Url) -> Result<String> {
+    log::info!("Making GET request to: {}", url);
     let resp = reqwest::get(url).await?;
-    log::debug!("Parsing result from url: {}", resp.url());
-    let resp_text = resp.text().await?;
-    Ok(scraper::Html::parse_document(&resp_text))
+    if !resp.status().is_success() {
+        return Err(eyre!(
+            "Received non success status code: {}",
+            resp.status().as_u16()
+        ));
+    }
+    Ok(resp.text().await?)
 }
 
-fn get_category_paths(page: &scraper::Html) -> Vec<&str> {
-    let category_elements = scraper::Selector::parse("ul.nav-list ul a[href]");
-    match category_elements {
-        Ok(elems) => page
-            .select(&elems)
-            .filter_map(move |d| d.value().attr("href"))
-            .collect(),
-        Err(_) => Vec::new(),
-    }
+async fn get_html(url: Url) -> Result<scraper::Html> {
+    let resp_text = get_page(url).await?;
+    Ok(scraper::Html::parse_document(&resp_text))
 }
 
 fn build_book_page_url(path: &str) -> Result<Url, ParseError> {
