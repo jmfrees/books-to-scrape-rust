@@ -1,121 +1,24 @@
 use futures::future;
 use futures::{stream, StreamExt};
-use std::num::ParseIntError;
 
 use env_logger::Env;
+
+use crate::book::Book;
+use crate::site_url::{build_book_page_url, build_catelogue_url};
 use eyre::{eyre, Result};
-use url::{ParseError, Url};
+use std::num::ParseIntError;
+use url::Url;
 
-#[derive(Debug)]
-#[allow(dead_code)]
-struct Book {
-    title: String,
-    upc: String,
-    price: String,
-    available: u32,
-    reviews: u32,
-    rating: u8,
+pub mod book;
+pub mod site_url;
+
+#[must_use]
+pub fn make_selector(selector: &str) -> scraper::Selector {
+    scraper::Selector::parse(selector).expect("Invalid selector string provided")
 }
 
-impl Book {
-    const fn new(
-        title: String,
-        upc: String,
-        price: String,
-        available: u32,
-        reviews: u32,
-        rating: u8,
-    ) -> Self {
-        Self {
-            title,
-            upc,
-            price,
-            available,
-            reviews,
-            rating,
-        }
-    }
-    pub fn from_html(page: &scraper::Html) -> Result<Self> {
-        Ok(Self::new(
-            Self::extract_title(page)?,
-            Self::extract_upc(page)?,
-            Self::extract_price(page)?,
-            Self::extract_available(page)?,
-            Self::extract_reviews(page)?,
-            Self::extract_rating(page)?,
-        ))
-    }
-
-    fn extract_title(book_page: &scraper::Html) -> Result<String> {
-        let sel = make_selector("div[class$='product_main'] h1");
-        book_page.select(&sel).next().map_or_else(|| {
-            log::warn!("Failed to extract title from book page");
-            Err(eyre!("Failed to extract title from book page"))
-        }, |elem| Ok(elem.text().collect()))
-    }
-
-    fn extract_upc(book_page: &scraper::Html) -> Result<String> {
-        let sel = make_selector("tbody tr:first-of-type td");
-        book_page.select(&sel).next().map_or_else(|| {
-            log::warn!("Failed to extract upc from book page");
-            Err(eyre!("Failed to extract upc from book page"))
-        }, |elem| Ok(elem.text().collect()))
-    }
-
-    fn extract_price(book_page: &scraper::Html) -> Result<String> {
-        let sel = make_selector("div[class$='product_main']  p[class^='price']");
-        book_page.select(&sel).next().map_or_else(|| {
-            log::warn!("Failed to extract price from book page");
-            Err(eyre!("Failed to extract price from book page"))
-        }, |elem| Ok(elem.text().collect()))
-    }
-
-    fn extract_available(book_page: &scraper::Html) -> Result<u32> {
-        let sel = make_selector("div[class$='product_main'] p[class^='instock']");
-        let text= if let Some(elem) = book_page.select(&sel).next() {
-            elem.text().collect::<String>()
-        } else {
-            log::warn!("Failed to availability from book page");
-            return Err(eyre!("Failed to availability from book page"));
-        };
-        Ok(parse_int(&text).unwrap_or(0))
-    }
-
-    fn extract_reviews(book_page: &scraper::Html) -> Result<u32> {
-        let sel = make_selector("tbody tr:last-of-type td");
-        let text: String = match book_page.select(&sel).next() {
-            Some(elem) => elem.text().collect(),
-            None => return Err(eyre!("Failed to extract title from book page")),
-        };
-        Ok(parse_int(&text).unwrap_or(0))
-    }
-
-    fn extract_rating(book_page: &scraper::Html) -> Result<u8> {
-        let ratings: Vec<&str> = vec!["Zero", "One", "Two", "Three", "Four", "Five"];
-        let sel = make_selector("div[class$='product_main'] p[class^='star-rating']");
-        let rating = match book_page.select(&sel).next() {
-            Some(elem) => elem
-                .value()
-                .attr("class")
-                .unwrap_or("")
-                .split(' ')
-                .last()
-                .unwrap_or(""),
-            None => return Err(eyre!("Failed to extract rating from book page")),
-        };
-
-        match ratings.iter().position(|&s| s == rating) {
-            Some(p) => Ok(p as u8),
-            None => Err(eyre!("Could not convert text to string")),
-        }
-    }
-}
-
-fn make_selector(selector: &str) -> scraper::Selector {
-    scraper::Selector::parse(selector).unwrap()
-}
-
-fn parse_int(input: &str) -> Result<u32, ParseIntError> {
+#[must_use]
+pub fn parse_int(input: &str) -> Result<u32, ParseIntError> {
     log::debug!("Attempting to parse input {}", input);
     input
         .chars()
@@ -125,7 +28,20 @@ fn parse_int(input: &str) -> Result<u32, ParseIntError> {
         .parse::<u32>()
 }
 
-async fn get_page(url: Url) -> Result<String> {
+#[cfg(test)]
+mod tests {
+    use super::parse_int;
+
+    #[test]
+    fn test_parse_int() {
+        assert_eq!(Ok(19), parse_int("In stock (19 available)"));
+        assert_eq!(Ok(0), parse_int("Out of stock (0 available)"));
+        assert!(parse_int("Out of stock").is_err());
+        assert!(parse_int("In stock ( available)").is_err());
+    }
+}
+
+pub async fn get_page(url: Url) -> Result<String> {
     log::info!("Making GET request to: {}", url);
     let resp = reqwest::get(url).await?;
     if !resp.status().is_success() {
@@ -137,104 +53,9 @@ async fn get_page(url: Url) -> Result<String> {
     Ok(resp.text().await?)
 }
 
-async fn get_html(url: Url) -> Result<scraper::Html> {
+pub async fn get_html(url: Url) -> Result<scraper::Html> {
     let resp_text = get_page(url).await?;
     Ok(scraper::Html::parse_document(&resp_text))
-}
-
-fn build_book_page_url(path: &str) -> Result<Url, ParseError> {
-    log::trace!("Building book page url with path: {}", path);
-    build_books_toscrape_url("catalogue/")?.join(path.trim_start_matches("../"))
-}
-
-fn build_books_toscrape_url(path: &str) -> Result<Url, ParseError> {
-    const HOMEPAGE: &str = "https://books.toscrape.com/";
-
-    log::trace!("Building url with path: {}", path);
-    Url::parse(HOMEPAGE)?.join(path)
-}
-
-fn get_catelogue_url(page: u32) -> Url {
-    build_books_toscrape_url(&format!("catalogue/page-{}.html", page))
-        .expect("Any u32 should parse correctly.")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_get_catelogue_url() -> Result<(), ParseError> {
-        assert_eq!(
-            "https://books.toscrape.com/catalogue/page-1.html",
-            get_catelogue_url(1).to_string()
-        );
-        assert_eq!(
-            "https://books.toscrape.com/catalogue/page-2.html",
-            get_catelogue_url(2).to_string()
-        );
-        assert_eq!(
-            "https://books.toscrape.com/catalogue/page-3.html",
-            get_catelogue_url(3).to_string()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_build_books_toscrape_url() -> Result<(), ParseError> {
-        assert_eq!(
-            "https://books.toscrape.com/a",
-            build_books_toscrape_url("a")?.to_string()
-        );
-        assert_eq!(
-            "https://books.toscrape.com/abc",
-            build_books_toscrape_url("abc")?.to_string()
-        );
-        assert_eq!(
-            "https://books.toscrape.com/multiple/paths",
-            build_books_toscrape_url("multiple/paths")?.to_string()
-        );
-        assert_eq!(
-            "https://books.toscrape.com/multiple/paths",
-            build_books_toscrape_url("/multiple/paths")?.to_string()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_build_book_page_url() -> Result<(), ParseError> {
-        assert_eq!(
-            "https://books.toscrape.com/catalogue/its-only-the-himalayas_981/index.html",
-            build_book_page_url("../../../its-only-the-himalayas_981/index.html")?.to_string()
-        );
-        assert_eq!(
-            "https://books.toscrape.com/catalogue/full-moon-over-noahs-ark-an-odyssey-to-mount-ararat-and-beyond_811/index.html",
-            build_book_page_url(
-            "../../../full-moon-over-noahs-ark-an-odyssey-to-mount-ararat-and-beyond_811/index.html"
-            )?.to_string()
-        );
-        assert_eq!(
-            "https://books.toscrape.com/catalogue/a",
-            build_book_page_url("a")?.to_string()
-        );
-        assert_eq!(
-            "https://books.toscrape.com/catalogue/abc",
-            build_book_page_url("abc")?.to_string()
-        );
-        assert_eq!(
-            "https://books.toscrape.com/catalogue/multiple/paths",
-            build_book_page_url("multiple/paths")?.to_string()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_parse_int() {
-        assert_eq!(Ok(19), parse_int("In stock (19 available)"));
-        assert_eq!(Ok(0), parse_int("Out of stock (0 available)"));
-        assert!(parse_int("Out of stock").is_err());
-        assert!(parse_int("In stock ( available)").is_err());
-    }
 }
 
 #[tokio::main]
@@ -243,12 +64,10 @@ async fn main() -> Result<()> {
 
     let book_url_selector = make_selector("article.product_pod a[title]");
 
-    // We can just iterate through the pages on the all product pages.
-    // This is a constant number for this site, but we want to demonstrate a general approach
-    // So we will generate a new url and stop when we get a 404
-
+    // We can just iterate through the pages on the catelogue pages.
+    // will generate sequential urls and stop consuming when we get a 404
     let pages: Vec<scraper::Html> = stream::iter(1..)
-        .map(get_catelogue_url)
+        .map(build_catelogue_url)
         .map(get_html)
         .buffered(10)
         .take_while(|page| future::ready(page.is_ok()))
@@ -259,8 +78,7 @@ async fn main() -> Result<()> {
     let book_urls = pages
         .iter()
         .flat_map(|page| page.select(&book_url_selector))
-        .filter_map(move |d| d.value().attr("href"))
-        .filter_map(|x| build_book_page_url(x).ok());
+        .filter_map(|d| build_book_page_url(d.value().attr("href")?).ok());
 
     let books = stream::iter(book_urls)
         .map(get_html)
