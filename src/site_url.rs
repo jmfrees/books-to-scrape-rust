@@ -28,7 +28,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_catelogue_url() -> Result<(), ParseError> {
+    fn test_get_catelogue_url() {
         assert_eq!(
             "https://books.toscrape.com/catalogue/page-1.html",
             build_catelogue_url(1).to_string()
@@ -41,7 +41,6 @@ mod tests {
             "https://books.toscrape.com/catalogue/page-3.html",
             build_catelogue_url(3).to_string()
         );
-        Ok(())
     }
 
     #[test]
