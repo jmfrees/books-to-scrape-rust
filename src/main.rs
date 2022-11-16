@@ -48,47 +48,36 @@ impl Book {
 
     fn extract_title(book_page: &scraper::Html) -> Result<String> {
         let sel = make_selector("div[class$='product_main'] h1");
-        match book_page.select(&sel).next() {
-            Some(elem) => Ok(elem.text().collect()),
-            None => {
-                log::warn!("Failed to extract title from book page");
-                Err(eyre!("Failed to extract title from book page"))
-            }
-        }
+        book_page.select(&sel).next().map_or_else(|| {
+            log::warn!("Failed to extract title from book page");
+            Err(eyre!("Failed to extract title from book page"))
+        }, |elem| Ok(elem.text().collect()))
     }
 
     fn extract_upc(book_page: &scraper::Html) -> Result<String> {
         let sel = make_selector("tbody tr:first-of-type td");
-        match book_page.select(&sel).next() {
-            Some(elem) => Ok(elem.text().collect()),
-            None => {
-                log::warn!("Failed to extract upc from book page");
-                Err(eyre!("Failed to extract upc from book page"))
-            }
-        }
+        book_page.select(&sel).next().map_or_else(|| {
+            log::warn!("Failed to extract upc from book page");
+            Err(eyre!("Failed to extract upc from book page"))
+        }, |elem| Ok(elem.text().collect()))
     }
 
     fn extract_price(book_page: &scraper::Html) -> Result<String> {
         let sel = make_selector("div[class$='product_main']  p[class^='price']");
-        match book_page.select(&sel).next() {
-            Some(elem) => Ok(elem.text().collect()),
-            None => {
-                log::warn!("Failed to extract price from book page");
-                Err(eyre!("Failed to extract price from book page"))
-            }
-        }
+        book_page.select(&sel).next().map_or_else(|| {
+            log::warn!("Failed to extract price from book page");
+            Err(eyre!("Failed to extract price from book page"))
+        }, |elem| Ok(elem.text().collect()))
     }
 
     fn extract_available(book_page: &scraper::Html) -> Result<u32> {
         let sel = make_selector("div[class$='product_main'] p[class^='instock']");
-        let text: String = match book_page.select(&sel).next() {
-            Some(elem) => elem.text().collect(),
-            None => {
-                log::warn!("Failed to availability from book page");
-                return Err(eyre!("Failed to availability from book page"));
-            }
+        let text= if let Some(elem) = book_page.select(&sel).next() {
+            elem.text().collect::<String>()
+        } else {
+            log::warn!("Failed to availability from book page");
+            return Err(eyre!("Failed to availability from book page"));
         };
-
         Ok(parse_int(&text).unwrap_or(0))
     }
 
@@ -159,13 +148,15 @@ fn build_book_page_url(path: &str) -> Result<Url, ParseError> {
 }
 
 fn build_books_toscrape_url(path: &str) -> Result<Url, ParseError> {
-    log::trace!("Building url with path: {}", path);
     const HOMEPAGE: &str = "https://books.toscrape.com/";
+
+    log::trace!("Building url with path: {}", path);
     Url::parse(HOMEPAGE)?.join(path)
 }
 
 fn get_catelogue_url(page: u32) -> Url {
-    build_books_toscrape_url(&format!("catalogue/page-{}.html", page)).unwrap()
+    build_books_toscrape_url(&format!("catalogue/page-{}.html", page))
+        .expect("Any u32 should parse correctly.")
 }
 
 #[cfg(test)]
@@ -260,9 +251,10 @@ async fn main() -> Result<()> {
         .map(get_catelogue_url)
         .map(get_html)
         .buffered(10)
-        .take_while(|page| future::ready(page.is_ok()) )
-        .map(|page| page.unwrap())
-        .collect().await;
+        .take_while(|page| future::ready(page.is_ok()))
+        .map(std::result::Result::unwrap)
+        .collect()
+        .await;
 
     let book_urls = pages
         .iter()
@@ -271,7 +263,7 @@ async fn main() -> Result<()> {
         .filter_map(|x| build_book_page_url(x).ok());
 
     let books = stream::iter(book_urls)
-        .map(|url| get_html(url))
+        .map(get_html)
         .buffer_unordered(10)
         .map(|page| Book::from_html(&page?))
         .collect::<Vec<Result<Book>>>()
